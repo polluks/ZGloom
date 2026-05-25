@@ -199,7 +199,7 @@ void Texture::DumpDebug(const char* name)
 	//dump a ppm file
 	FILE* file = fopen(name, "wb");
 
-	fprintf(file, "P6\n64 %i\n255\n", columns.size());
+	fprintf(file, "P6\n64 %lu\n255\n", columns.size());
 
 	for (size_t c = 0; c < columns.size(); c++)
 	{
@@ -416,7 +416,9 @@ bool GloomMap::Load(const char* name, ObjectGraphics* nobj)
 
 	for (int t = 0; t < 8; t++)
 	{
-		texturestotal += textures[t].columns.size() / 64;
+		// G3 (and others?) occasionally have short textures
+		//texturestotal += textures[t].columns.size() / 64;
+		if (textures[t].columns.size()) texturestotal += 20;
 	}
 
 	for (auto i = 0; i < 160; i++)
@@ -559,12 +561,13 @@ void GloomMap::ExecuteEvent(uint32_t e, bool& gotele, Teleport& teleout)
 			CalcVecs(mo);
 
 			// ordering seems needed for collison?
-			if ((mo.t == ObjectGraphics::OLT_PLAYER1) || (mo.t == ObjectGraphics::OLT_PLAYER1))
+			if (mo.t == ObjectGraphics::OLT_PLAYER1)
 			{
 				mapobjects.push_front(mo);
 			}
-			else
+			else if (mo.t != ObjectGraphics::OLT_PLAYER2)
 			{
+				// DO NOTHING FOR P2: Invisible P2 object causes enemies to be hurt!
 				mapobjects.push_back(mo);
 			}
 		}
@@ -777,11 +780,13 @@ MapObject::MapObject(Object m)
 	z.SetInt(m.z);
 	t = m.t;
 
+	data.ms.rotspeed = 0;
+
 	data.ms.frame = m.frame;
 	data.ms.framespeed = m.framespeed;
 
 	data.ms.render = m.render;
-	data.ms.rot = m.rot;
+	data.ms.rotquick.SetInt(m.rot);
 	data.ms.movspeed = m.movspeed;
 	data.ms.shape = m.shape;
 	data.ms.chunks = m.chunk;
@@ -797,6 +802,11 @@ MapObject::MapObject(Object m)
 	data.ms.reloadcnt = 0;
 
 	data.ms.bounce = 0;
+	data.ms.bouncecnt = 0;
+	data.ms.mega = 0;
+
+	data.ms.messtimer = 0;
+	data.ms.mess = 0;
 
 	data.ms.colltype = m.colltype;
 	data.ms.collwith = m.collwith;
@@ -811,6 +821,9 @@ MapObject::MapObject(Object m)
 	data.ms.blood = m.blood;
 	data.ms.punchrate = m.punchrate;
 	data.ms.scale = m.scale;
+	data.ms.fired = 0;
+	data.ms.invisible = 0;
+	data.ms.thermo = 0;
 
 	switch (t)
 	{
@@ -842,7 +855,7 @@ MapObject::MapObject(Object m)
 			data.ms.die = BlowObject;
 			break;
 		case ObjectGraphics::OLT_DEMON:
-			data.ms.logic = PhantomLogic;
+			data.ms.logic = DemonLogic;
 			data.ms.hit = HurtNGrunt;
 			data.ms.die = BlowObject;
 			break;
@@ -868,8 +881,13 @@ MapObject::MapObject(Object m)
 			break;
 		case ObjectGraphics::OLT_DEATHHEAD:
 			data.ms.logic = DeathLogic;
+			data.ms.hit = HurtDeath;
+			data.ms.die = BlowDeath;
+			break;
+		case ObjectGraphics::OLT_DRAGON:
+			data.ms.logic = DragonLogic;
 			data.ms.hit = NullLogicComp;
-			data.ms.die = KillLogicComp;
+			data.ms.die = BlowDragon;
 			break;
 		case ObjectGraphics::OLT_WEAPON1:
 		case ObjectGraphics::OLT_WEAPON2:
@@ -884,6 +902,21 @@ MapObject::MapObject(Object m)
 			data.ms.logic = NullLogic;
 			data.ms.hit = HealthGot;
 			data.ms.die = HealthGot;
+			break;
+		case ObjectGraphics::OLT_INVISI:
+			data.ms.logic = NullLogic;
+			data.ms.hit = InvisGot;
+			data.ms.die = InvisGot;
+			break;
+		case ObjectGraphics::OLT_THERMO:
+			data.ms.logic = NullLogic;
+			data.ms.hit = ThermoGot;
+			data.ms.die = ThermoGot;
+			break;
+		case ObjectGraphics::OLT_BOUNCY:
+			data.ms.logic = BouncyLogic;
+			data.ms.hit = BouncyGot;
+			data.ms.die = BouncyGot;
 			break;
 		default:
 			data.ms.logic = NullLogic;
@@ -918,6 +951,17 @@ MapObject::MapObject()
 	data.ms.hurtpause = 0;
 	data.ms.punchrate = 0;
 	data.ms.scale = 0x200;
+	data.ms.rotspeed = 0;
+	data.ms.mega = 0;
+	data.ms.bounce = 0;
+	data.ms.bouncecnt = 0;
+
+	data.ms.messtimer = 0;
+	data.ms.mess = 0;
+
+	data.ms.fired = 0;
+	data.ms.invisible = 0;
+	data.ms.thermo = 0;
 
 	// avoid zero as I need to flag nothing
 	identifier = counter + 1;

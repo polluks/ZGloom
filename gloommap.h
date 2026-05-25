@@ -16,11 +16,13 @@ class Blood
 		Quick y;
 		Quick z;
 		Quick xvec;
-		Quick dest;
+		uint64_t dest;
 		Quick yvec;
 		Quick zvec;
 		uint32_t color; // colour AND
 		bool killme;
+
+		Blood() { killme = false; };
 };
 
 // rot/morph poly
@@ -135,7 +137,8 @@ class MapObjectSideBand
 
 	uint32_t render;
 
-	uint32_t rot;
+	Quick rotquick;
+	int32_t rotspeed;
 	uint32_t oldrot;
 	int32_t movspeed;
 	int32_t xvec;
@@ -187,8 +190,17 @@ class MapObjectSideBand
 	int16_t bouncecnt;
 	int16_t bounce;
 
+	int16_t mega;
+	int16_t mess;
+	int16_t messtimer;
+	
+	//purely used for gun
+	int16_t fired;
+
 	uint16_t blood;
 	int16_t scale;
+	int16_t invisible;
+	int16_t thermo;
 
 	void(*logic)(MapObject&, GameLogic*);
 	void(*oldlogic)(MapObject&, GameLogic*);
@@ -300,7 +312,7 @@ class Zone
 	int16_t	na;
 	int16_t	nb;
 	int16_t	ln;
-	int8_t t[8]; //8 textures to use!
+	uint8_t t[8]; //8 textures to use!
 	int16_t	sc;
 	int16_t ev;
 	int16_t open;

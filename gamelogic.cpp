@@ -2,6 +2,8 @@
 #include "renderer.h"
 #include "monsterlogic.h"
 #include "soundhandler.h"
+#include "hud.h"
+#include "config.h"
 
 void GameLogic::Init(ObjectGraphics* ograph)
 {
@@ -55,11 +57,16 @@ void GameLogic::ResetPlayer(MapObject& o)
 	o.data.ms.hitpoints = 25;
 	o.data.ms.eyey = -110;
 	o.data.ms.logic = NullLogic;
-	o.data.ms.colltype = 8;
-	o.data.ms.collwith = 4;
+	//o.data.ms.colltype = 8;
+	//o.data.ms.collwith = 4;
+	// 3 seconds invulnrability. Curiously, code comment state 2?
+	o.data.ms.delay = 75;
 	o.x = origx;
 	o.z = origz;
-	o.data.ms.rot = origrot;
+	o.data.ms.rotquick.SetInt(origrot);
+	o.data.ms.invisible = 0;
+	o.data.ms.thermo = 0;
+	o.data.ms.bouncecnt = 0;
 }
 
 void GameLogic::InitLevel(GloomMap* gmapin, Camera* cam, ObjectGraphics* ograph)
@@ -67,6 +74,9 @@ void GameLogic::InitLevel(GloomMap* gmapin, Camera* cam, ObjectGraphics* ograph)
 	gmap = gmapin;
 	objectgraphics = ograph;
 	levelfinished = false;
+	levelfinishednow = false;
+	sucking = 0;
+	sucker = 0;
 	std::fill(animframe, animframe + 160, 0);
 
 	for (auto e = 0; e < 25; e++)
@@ -81,11 +91,11 @@ void GameLogic::InitLevel(GloomMap* gmapin, Camera* cam, ObjectGraphics* ograph)
 			cam->x = o.x;
 			cam->y = 120; //TODO, and rotation
 			cam->z = o.z;
-			cam->rot = o.data.ms.rot;
+			cam->rotquick = o.data.ms.rotquick;
 
 			origx = o.x;
 			origz = o.z;
-			origrot = o.data.ms.rot;
+			origrot = o.data.ms.rotquick.GetInt();
 
 			o.data.ms.hitpoints = p1health;
 			//o.data.ms.lives = p1lives; TODO
@@ -135,13 +145,66 @@ void GameLogic::MoveBlood()
 	for (auto &b : gmap->GetBlood())
 	{
 		//TODO: sucking, screen splatter
-		b.x = b.x + b.xvec;
-		b.y = b.y + b.yvec;
-		b.z = b.z + b.zvec;
 
-		Quick temp;
-		temp.SetVal(0x8000);
-		b.yvec = b.yvec + temp;
+		if (b.y.GetInt() < 0)
+		{
+			// normal blood
+			b.x = b.x + b.xvec;
+			b.y = b.y + b.yvec;
+			b.z = b.z + b.zvec;
+
+			Quick temp;
+			temp.SetVal(0x8000);
+			b.yvec = b.yvec + temp;
+
+			if (b.y.GetInt() >= 0)
+			{
+				b.killme = true;
+			}
+		}
+		else
+		{
+			// deaths head suck!
+			/*
+			move.l	bl_xvec(a5),d0
+			add.l	d0,bl_x(a5)
+			move.l	bl_zvec(a5),d1
+			add.l	d1,bl_z(a5)
+			;
+			move.l	bl_dest(a5),a0
+			move	bl_x(a5),d0
+			sub	ob_x(a0),d0
+			muls	d0,d0
+			move	bl_z(a5),d1
+			sub	ob_z(a0),d1
+			muls	d1,d1
+			add.l	d1,d0
+			cmp.l	#64*64,d0
+			bcc.s	.loop
+			bra.s	.kill
+			*/
+
+			if (!sucking) 
+			{
+				b.killme = true;
+			}
+			else
+			{
+				b.x = b.x + b.xvec;
+				b.z = b.z + b.zvec;
+
+				MapObject o = GetNamedObj(b.dest);
+
+				int32_t dist = (o.x.GetInt() - b.x.GetInt()) *  (o.x.GetInt() - b.x.GetInt());
+
+				dist += (o.z.GetInt() - b.z.GetInt()) *  (o.z.GetInt() - b.z.GetInt());
+
+				if (dist < 64 * 64)
+				{
+					b.killme = true;
+				}
+			}
+		}
 	}
 
 	// kill pass
@@ -149,7 +212,7 @@ void GameLogic::MoveBlood()
 
 	while (b != gmap->GetBlood().end())
 	{
-		if (b->y.GetInt()>=0)
+		if (b->killme)
 		{
 			b = gmap->GetBlood().erase(b);
 		}
@@ -290,6 +353,22 @@ MapObject GameLogic::GetPlayerObj()
 	return gmap->GetMapObjects().front();
 }
 
+MapObject GameLogic::GetNamedObj(uint64_t id)
+{
+	for (auto o : gmap->GetMapObjects())
+	{
+		if (o.identifier == id)
+		{
+			return o;
+			break;
+		}
+	}
+
+	// warning squash
+
+	return gmap->GetMapObjects().front();
+}
+
 uint8_t GameLogic::PickCalc(MapObject& o)
 {
 	/*
@@ -310,7 +389,10 @@ uint8_t GameLogic::PickCalc(MapObject& o)
 	MapObject player = GetPlayerObj();
 	uint8_t ang = GloomMaths::CalcAngle(player.x.GetInt(), player.z.GetInt(), o.x.GetInt(), o.z.GetInt());
 
-	// TODO invisibility
+	if (player.data.ms.invisible)
+	{
+		ang = ang + (GloomMaths::RndW() & 63) - 32;
+	}
 	return ang;
 }
 
@@ -618,8 +700,8 @@ bool GameLogic::Update(Camera* cam)
 
 	Quick camrots[4], camrotstrafe[4];
 
-	GloomMaths::GetCamRot(cam->rot, camrots);
-	GloomMaths::GetCamRot((cam->rot)+64&0xFF, camrotstrafe);
+	GloomMaths::GetCamRot(cam->rotquick.GetInt()&0xFF, camrots);
+	GloomMaths::GetCamRot(((cam->rotquick.GetInt())+64)&0xFF, camrotstrafe);
 	const Uint8 *keystate = SDL_GetKeyboardState(NULL);
 
 	Quick newx = cam->x;
@@ -627,35 +709,65 @@ bool GameLogic::Update(Camera* cam)
 
 	MapObject playerobj = GetPlayerObj();
 	int16_t initialhealth = playerobj.data.ms.hitpoints;
+	bool squished = false;
 
 	if (playerobj.data.ms.logic == NullLogic)
 	{
 		playerobj.x = cam->x;
 		playerobj.y.SetInt(0);
 		playerobj.z = cam->z;
-		playerobj.data.ms.rot = cam->rot;
+		playerobj.data.ms.rotquick = cam->rotquick;
 
 		inc.SetVal(playerobj.data.ms.movspeed);
 
-		if (keystate[SDL_SCANCODE_UP])
+		//wire these up to controller as well at some point
+
+		bool controlfire  = keystate[Config::GetKey(Config::KEY_SHOOT)] != 0;
+		bool controlup = keystate[Config::GetKey(Config::KEY_UP)] != 0;
+		bool controldown = keystate[Config::GetKey(Config::KEY_DOWN)] != 0;
+		bool controlleft = keystate[Config::GetKey(Config::KEY_LEFT)] != 0;
+		bool controlright = keystate[Config::GetKey(Config::KEY_RIGHT)] != 0;
+		bool controlstrafeleft = keystate[Config::GetKey(Config::KEY_SLEFT)] != 0;
+		bool controlstraferight = keystate[Config::GetKey(Config::KEY_SRIGHT)] != 0;
+		bool controlstrafemod = keystate[Config::GetKey(Config::KEY_STRAFEMOD)] != 0;
+
+		if (Config::HaveController())
+		{
+			Sint32 contX = Config::GetControllerX();
+			Sint32 contY = Config::GetControllerY();
+			
+			if (contX < -8000) controlstrafeleft = true;
+			if (contX >  8000) controlstraferight = true;
+			if (contY < -8000) controlup = true;
+			if (contY >  8000) controldown = true;
+
+			if (Config::GetControllerFire()) controlfire = true;
+		}
+
+		if (SDL_GetMouseState(NULL, NULL))
+		{
+			controlfire = true;
+		}
+
+		if (controlup)
 		{
 			// U 
 			newx = cam->x - camrots[1] * inc;
 			newz = cam->z + camrots[0] * inc;
 			moved = true;
 		}
-		if (keystate[SDL_SCANCODE_DOWN])
+		if (controldown)
 		{
 			// D
 			newx = cam->x + camrots[1] * inc;
 			newz = cam->z - camrots[0] * inc;
 			moved = true;
 		}
-		if (keystate[SDL_SCANCODE_LEFT])
+		if (controlleft || controlstrafeleft)
 		{
 			//L
 			//TODO: Rotation acceleration
-			if (keystate[SDL_SCANCODE_LALT])
+			if (controlstrafemod || controlstrafeleft)
 			{
 				//strafe
 				newx = newx + camrotstrafe[1] * inc;
@@ -664,13 +776,13 @@ bool GameLogic::Update(Camera* cam)
 			}
 			else
 			{
-				cam->rot -= 4;
+				cam->rotquick.SetInt(cam->rotquick.GetInt() - 4);
 			}
 		}
-		if (keystate[SDL_SCANCODE_RIGHT])
+		if (controlright || controlstraferight)
 		{
 			//R
-			if (keystate[SDL_SCANCODE_LALT])
+			if (controlstrafemod || controlstraferight)
 			{
 				//strafe
 				newx = newx - camrotstrafe[1] * inc;
@@ -679,7 +791,7 @@ bool GameLogic::Update(Camera* cam)
 			}
 			else
 			{
-				cam->rot += 4;
+				cam->rotquick.SetInt(cam->rotquick.GetInt() + 4);
 			}
 		}
 
@@ -727,16 +839,42 @@ bool GameLogic::Update(Camera* cam)
 			}
 		}
 
-		if (keystate[SDL_SCANCODE_LCTRL])
+		if (controlfire)
 		{
 			//Shoot!
 			if ((playerobj.data.ms.reloadcnt == 0) && (!firedown))
 			{
 				auto wep = playerobj.data.ms.weapon;
-				Shoot(playerobj, this, (playerobj.data.ms.collwith & 3) ^ 3, 0, wtable[wep].hitpoint, wtable[wep].damage, wtable[wep].speed, wtable[wep].shape, wtable[wep].spark);
+
+				if (playerobj.data.ms.mega)
+				{
+					if (playerobj.data.ms.mega >= (750 + 125))
+					{
+						// ULTRA MEGA OVERKILL
+						playerobj.data.ms.rotquick.SetInt(playerobj.data.ms.rotquick.GetInt() + 8);
+						Shoot(playerobj, this, (playerobj.data.ms.collwith & 3) ^ 3, 0, wtable[wep].hitpoint, wtable[wep].damage, wtable[wep].speed, wtable[wep].shape, wtable[wep].spark);
+						playerobj.data.ms.rotquick.SetInt(playerobj.data.ms.rotquick.GetInt() - 16);
+						Shoot(playerobj, this, (playerobj.data.ms.collwith & 3) ^ 3, 0, wtable[wep].hitpoint, wtable[wep].damage, wtable[wep].speed, wtable[wep].shape, wtable[wep].spark);
+						playerobj.data.ms.rotquick.SetInt(playerobj.data.ms.rotquick.GetInt() + 8);
+						Shoot(playerobj, this, (playerobj.data.ms.collwith & 3) ^ 3, 0, wtable[wep].hitpoint, wtable[wep].damage, wtable[wep].speed, wtable[wep].shape, wtable[wep].spark);
+					}
+					else
+					{
+						playerobj.data.ms.rotquick.SetInt(playerobj.data.ms.rotquick.GetInt() + 4);
+						Shoot(playerobj, this, (playerobj.data.ms.collwith & 3) ^ 3, 0, wtable[wep].hitpoint, wtable[wep].damage, wtable[wep].speed, wtable[wep].shape, wtable[wep].spark);
+						playerobj.data.ms.rotquick.SetInt(playerobj.data.ms.rotquick.GetInt() - 8);
+						Shoot(playerobj, this, (playerobj.data.ms.collwith & 3) ^ 3, 0, wtable[wep].hitpoint, wtable[wep].damage, wtable[wep].speed, wtable[wep].shape, wtable[wep].spark);
+						playerobj.data.ms.rotquick.SetInt(playerobj.data.ms.rotquick.GetInt() + 4);
+					}
+				}
+				else
+				{
+					Shoot(playerobj, this, (playerobj.data.ms.collwith & 3) ^ 3, 0, wtable[wep].hitpoint, wtable[wep].damage, wtable[wep].speed, wtable[wep].shape, wtable[wep].spark);
+				}
 				SoundHandler::Play(wtable[wep].sound);
 				playerobj.data.ms.reloadcnt = playerobj.data.ms.reload;
-				firedown = true;
+				if (!Config::GetAutoFire()) firedown = true;
+				playerobj.data.ms.fired = 10;
 			}
 		}
 		else
@@ -773,7 +911,35 @@ bool GameLogic::Update(Camera* cam)
 				cam->x = newx;
 				cam->z = newz;
 			}
+			else
+			{
+				if (Collision(false, cam->x.GetInt(), cam->z.GetInt(), 32, overshoot, closestzone))
+				{
+					squished = true;
+				}
+			}
 		}
+
+		// mouse control
+		{
+			int mx, my;
+			SDL_GetRelativeMouseState(&mx, &my);
+
+			cam->rotquick.SetVal(cam->rotquick.GetVal() + mx*Config::GetMouseSens() * 800);
+		}
+
+		//gamepad control
+		if (Config::HaveController())
+		{
+			Sint32 rot = Config::GetControllerRot();
+
+			if (abs(rot) < 8000) rot = 0;
+
+			cam->rotquick.SetVal(cam->rotquick.GetVal() + rot * 10);
+		}
+		
+
+		CheckSuck(cam);
 
 		cam->y = -(playerobj.y.GetInt() + playerobj.data.ms.eyey);
 		// add bounce
@@ -834,10 +1000,12 @@ bool GameLogic::Update(Camera* cam)
 	{
 		cam->x.SetInt(activetele.x);
 		cam->z.SetInt(activetele.z);
-		cam->rot = (uint8_t)activetele.rot;
+		cam->rotquick.SetInt((uint8_t)activetele.rot);
 		playerobj.data.ms.pixsizeadd = -playerobj.data.ms.pixsizeadd;
 		if (levelfinished) done = true;
 	}
+
+	if (levelfinishednow) done = true;
 
 	if (playerobj.data.ms.pixsize == 0) playerobj.data.ms.pixsizeadd = 0;
 
@@ -895,6 +1063,54 @@ bool GameLogic::Update(Camera* cam)
 	playerobj.data.ms.delay = playerobjupdated.data.ms.delay;
 	playerobj.data.ms.colltype = playerobjupdated.data.ms.colltype;
 	playerobj.data.ms.collwith = playerobjupdated.data.ms.collwith;
+	playerobj.data.ms.mega = playerobjupdated.data.ms.mega;
+	playerobj.data.ms.mess = playerobjupdated.data.ms.mess;
+	playerobj.data.ms.messtimer = playerobjupdated.data.ms.messtimer;
+	playerobj.data.ms.invisible = playerobjupdated.data.ms.invisible;
+	playerobj.data.ms.thermo = playerobjupdated.data.ms.thermo;
+	playerobj.data.ms.bouncecnt = playerobjupdated.data.ms.bouncecnt;
+
+	if (squished)
+	{
+		playerobj.data.ms.hitpoints--;
+	}
+
+	if (playerobj.data.ms.mega)
+	{
+		playerobj.data.ms.mega--;
+
+		if (playerobj.data.ms.mega == 0)
+		{
+			playerobj.data.ms.mess = Hud::MESSAGES_MEGA_WEAPON_OUT;
+			playerobj.data.ms.messtimer = -127;
+		}
+	}
+	if (playerobj.data.ms.invisible)
+	{
+		playerobj.data.ms.invisible--;
+		if (playerobj.data.ms.invisible==0)
+		{
+			playerobj.data.ms.mess = Hud::MESSAGES_INVISIBILITY_OUT;
+			playerobj.data.ms.messtimer = -127;
+		}
+	}
+	if (playerobj.data.ms.thermo)
+	{
+		playerobj.data.ms.thermo--;
+		if (playerobj.data.ms.thermo == 0)
+		{
+			playerobj.data.ms.mess = Hud::MESSAGES_THERMO_OUT;
+			playerobj.data.ms.messtimer = -127;
+		}
+	}
+	if (playerobj.data.ms.messtimer < 0)
+	{
+		playerobj.data.ms.messtimer++;
+	}
+	if (playerobj.data.ms.fired>0)
+	{
+		playerobj.data.ms.fired--;
+	}
 
 	playerhit = playerobj.data.ms.hitpoints < initialhealth;
 
@@ -905,12 +1121,39 @@ bool GameLogic::Update(Camera* cam)
 		playerobj.y = playerobjupdated.y;
 		cam->y = -(playerobj.y.GetInt() + playerobj.data.ms.eyey);
 		cam->z = playerobj.z = playerobjupdated.z;
-		cam->rot = playerobj.data.ms.rot = playerobjupdated.data.ms.rot;
+
+		playerobj.data.ms.rotquick = playerobjupdated.data.ms.rotquick;
+		cam->rotquick = playerobj.data.ms.rotquick;
 		playerhit = true;
 	}
 
 	//do this after the above otherwise I don't pick up the player reset on death
 	playerobj.data.ms.logic = playerobjupdated.data.ms.logic;
+
+	if (playerobj.data.ms.logic == NullLogic)
+	{
+		//invuln timer after death
+		if (playerobj.data.ms.delay)
+		{
+			playerobj.data.ms.delay--;
+
+			if (playerobj.data.ms.delay == 0)
+			{
+				//reset collision data so can be hit again
+				playerobj.data.ms.colltype = 8;
+				playerobj.data.ms.collwith = 4;
+			}
+		}
+	}
+
+	if (squished &&  (playerobj.data.ms.hitpoints <= 0))
+	{
+		playerobj.data.ms.hitpoints = 0;
+		playerobj.data.ms.logic = PlayerDeath;
+
+		playerobj.data.ms.colltype = 0;
+		playerobj.data.ms.collwith = 0;
+	}
 
 	//kill pass
 
@@ -962,6 +1205,19 @@ int32_t GameLogic::GetTeleEffect()
 	}
 
 	return 0;
+}
+
+bool GameLogic::GetThermo()
+{
+	for (auto o : gmap->GetMapObjects())
+	{
+		if (o.t == ObjectGraphics::OLT_PLAYER1)
+		{
+			return o.data.ms.thermo != 0;
+		}
+	}
+
+	return false;
 }
 
 void GameLogic::ObjectCollision()
@@ -1038,4 +1294,77 @@ void GameLogic::ObjectCollision()
 			}
 		}
 	}
+}
+
+void GameLogic::CheckSuck(Camera* cam)
+{
+	/*
+	checksuck	cmp.l	sucking(pc),a5
+	bne.s	.nosuck
+	;
+	move.l	suckangle(pc),a0
+	moveq	#25,d0
+	move	d0,d1
+	muls	2(a0),d0
+	neg.l	d0
+	add.l	d0,d6
+	;
+	muls	6(a0),d1
+	add.l	d1,d7
+	bsr	checknewslow
+	beq.s	.newok
+	bsr	adjustpos
+	beq.s	.newok
+	bsr	adjustpos
+	beq.s	.newok
+	;
+	move.l	ob_x(a5),d6
+	move.l	ob_z(a5),d7
+	bra.s	.nosuck
+	;
+	.newok	move.l	d6,ob_x(a5)
+	move.l	d7,ob_z(a5)
+	;
+	.nosuck	rts
+
+	*/
+	Quick xpos, zpos;
+
+	xpos = cam->x;
+	zpos = cam->z;
+
+	if (!sucking) return;
+
+	int16_t camrots[4];
+	GloomMaths::GetCamRotRaw(suckangle, camrots);
+
+	int32_t xvec = 25 * camrots[1];
+	int32_t zvec = 25 * camrots[3];
+
+	xvec = -xvec;
+
+	xpos.SetVal(xpos.GetVal() + xvec);
+	zpos.SetVal(zpos.GetVal() + zvec);
+
+	int32_t overshoot, closestzone;
+
+	if (!Collision(false, xpos.GetInt(), zpos.GetInt(), 32, overshoot, closestzone))
+	{
+		cam->x = xpos;
+		cam->z = zpos;
+	}
+	else
+	{
+		if (!AdjustPos(overshoot, xpos, zpos, 32, closestzone))
+		{
+			cam->x = xpos;
+			cam->z = zpos;
+		}
+		else if (!AdjustPos(overshoot, xpos, zpos, 32, closestzone))
+		{
+			cam->x = xpos;
+			cam->z = zpos;
+		}
+	}
+
 }

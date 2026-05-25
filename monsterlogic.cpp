@@ -2,9 +2,15 @@
 #include "gloommaths.h"
 #include "gamelogic.h"
 #include "monsterlogic.h"
+#include "hud.h"
 
 void BaldyPunch(MapObject& o, GameLogic* logic);
 int8_t CheckColl(MapObject& o1, MapObject &o2);
+void PutFire(MapObject& o, GameLogic* logic);
+
+//used to pass around collision data for bounce logic
+
+static int32_t clostestwall;
 
 void NullLogic(MapObject& o, GameLogic* logic)
 {
@@ -280,6 +286,11 @@ void MakeSparks(MapObject& o, GameLogic* logic)
 	}
 }
 
+void MakeSparksQ(MapObject& thisobj, MapObject& otherobj, GameLogic* logic)
+{
+	MakeSparks(thisobj, logic);
+}
+
 void CalcVecs(MapObject& o)
 {
 	/*
@@ -301,7 +312,7 @@ void CalcVecs(MapObject& o)
 		rts
 	*/
 
-	uint32_t ang = o.data.ms.rot & 255;
+	uint32_t ang = o.data.ms.rotquick.GetInt() & 255;
 
 	Quick camrots[4], t;
 	GloomMaths::GetCamRot(ang, camrots);
@@ -359,10 +370,12 @@ bool CheckVecs(MapObject& o, GameLogic* logic)
 			logic->AdjustPos(overshoot, newx, newz, 32, zone);
 			o.x = newx;
 			o.z = newz;
+			clostestwall = zone;
 			return false;
 		}
 		else
 		{
+			clostestwall = zone;
 			return false;
 		}
 	}
@@ -414,13 +427,13 @@ void PauseLogic(MapObject&o, GameLogic* logic)
 
 		uint8_t ang = logic->PickCalc(o);
 
-		int16_t compang = (int16_t)(player.data.ms.rot&0xFF) - ang;
+		int16_t compang = (int16_t)(player.data.ms.rotquick.GetInt()&0xFF) - ang;
 
 		if (compang < 0) compang = -compang;
 
 		if ((compang>64) && (compang < 192))
 		{
-			o.data.ms.rot = o.data.ms.oldrot;
+			o.data.ms.rotquick.SetInt(o.data.ms.oldrot);
 			CalcVecs(o);
 		}
 	}
@@ -467,7 +480,7 @@ void Fire1(MapObject& o, GameLogic* logic)
 	ang += (rand & 31) - 16;
 	ang &= 0xFF;
 
-	o.data.ms.rot = ang;
+	o.data.ms.rotquick.SetInt(ang);
 	CalcVecs(o);
 	o.data.ms.delay = 7;
 
@@ -484,15 +497,15 @@ void MonsterFix(MapObject& o, GameLogic* logic)
 	if (1)//!CheckVecs(o, logic))
 	{
 		// try +/- 90 degrees
-		o.data.ms.rot += (GloomMaths::RndW() > 0) ? 64 : -64;
+		o.data.ms.rotquick.SetInt(((GloomMaths::RndW() > 0) ? 64 : -64) + o.data.ms.rotquick.GetInt());
 		CalcVecs(o);
 		if (CheckVecs(o, logic)) goto good;
 
-		o.data.ms.rot += 128;
+		o.data.ms.rotquick.SetInt(128 + o.data.ms.rotquick.GetInt());
 		CalcVecs(o);
 		if (CheckVecs(o, logic)) goto good;
 
-		o.data.ms.rot = o.data.ms.oldrot + 128;
+		o.data.ms.rotquick.SetInt(o.data.ms.oldrot + 128);
 		CalcVecs(o);
 		CheckVecs(o, logic);
 	}
@@ -542,15 +555,15 @@ void MonsterMove(MapObject& o, GameLogic* logic)
 	if (!CheckVecs(o, logic))
 	{
 		// try +/- 90 degrees
-		o.data.ms.rot += (GloomMaths::RndW() > 0) ? 64 : -64;
+		o.data.ms.rotquick.SetInt(((GloomMaths::RndW() > 0) ? 64 : -64) + o.data.ms.rotquick.GetInt());
 		CalcVecs(o);
 		if (CheckVecs(o, logic)) goto good;
 
-		o.data.ms.rot += 128;
+		o.data.ms.rotquick.SetInt(128 + o.data.ms.rotquick.GetInt());
 		CalcVecs(o);
 		if (CheckVecs(o, logic)) goto good;
 
-		o.data.ms.rot = o.data.ms.oldrot + 128;
+		o.data.ms.rotquick.SetInt(o.data.ms.oldrot + 128);
 		CalcVecs(o);
 		CheckVecs(o, logic);
 	}
@@ -569,7 +582,7 @@ void MonsterLogic(MapObject& o, GameLogic* logic)
 	;
 	*/
 
-	o.data.ms.oldrot = o.data.ms.rot;
+	o.data.ms.oldrot = o.data.ms.rotquick.GetInt();
 	/* 
 		subq	#1, ob_delay(a5)
 		ble	fire1
@@ -587,13 +600,139 @@ void MonsterLogic(MapObject& o, GameLogic* logic)
 
 }
 
+void CalcBounce(MapObject& o, GameLogic* logic)
+{
+
+	/*
+		calcbounce; calculate bounce vector...poly in a4, obj in a5
+		;
+		; R = 2 N(N dot V) - V
+		;
+		; where R = reflect vector, N = normal to poly, V = original vector
+		;
+		subq	#1, ob_bouncecnt(a5)
+		bge.s.nok
+		bsr	makesparksq
+		bra	killobject
+		.nok;
+		move.l	closewall(pc), a4
+		movem	ob_nxvec(a5), d0 - d1; normalized dir
+		movem	zo_na(a4), d2 - d3; normal to poly
+		neg	d2
+	*/
+
+	bool done = false;
+	while (!done)
+	{
+		o.data.ms.bouncecnt--;
+
+		if (o.data.ms.bouncecnt < 0)
+		{
+			o.killme = true;
+			MakeSparks(o, logic);
+			return;
+		}
+
+		int32_t nxvec, nzvec;
+		int32_t na, nb;
+
+		nxvec = o.data.ms.nxvec;
+		nzvec = o.data.ms.nzvec;
+		logic->GetNorm(clostestwall, na, nb);
+		na = -na;
+
+		/*
+			;
+			; calc dot product :
+			;
+			move	d0, d4
+			muls	d2, d4
+			move	d1, d5
+			muls	d3, d5
+			add.l	d5, d4
+			add.l	d4, d4
+			swap	d4; dot product ?
+
+			*/
+
+		int32_t dp = nxvec*na + nzvec*nb;
+		dp += dp;
+		dp >>= 16;
+
+		/*
+			;
+			muls	d4, d2
+			lsl.l	#2, d2
+			swap	d0
+			clr	d0
+			sub.l	d0, d2
+			swap	d2
+			;
+			muls	d4, d3
+			lsl.l	#2, d3
+			swap	d1
+			clr	d1
+			sub.l	d1, d3
+			swap	d3
+			;
+			*/
+
+		na *= dp;
+		na <<= 2;
+		nxvec <<= 16;
+		nxvec &= 0xFFFF0000;
+		na -= nxvec;
+		na >>= 16;
+
+		nb *= dp;
+		nb <<= 2;
+		nzvec <<= 16;
+		nzvec &= 0xFFFF0000;
+		nb -= nzvec;
+		nb >>= 16;
+		/*
+			movem	d2 - d3, ob_nxvec(a5)
+			;
+			neg	d2
+			muls	ob_movspeed(a5), d2
+			add.l	d2, d2
+			muls	ob_movspeed(a5), d3
+			add.l	d3, d3
+			;
+			movem.l	d2 - d3, ob_xvec(a5)
+			;
+			bsr	checkvecs
+			beq.s	putfire
+			bra	calcbounce
+		*/
+
+		o.data.ms.nxvec = na;
+		o.data.ms.nzvec = nb;
+
+		na = -na;
+
+		na *= o.data.ms.movspeed;
+		na += na;
+
+		nb *= o.data.ms.movspeed;
+		nb += nb;
+
+		o.data.ms.xvec = na;
+		o.data.ms.zvec = nb;
+
+		if (CheckVecs(o, logic))
+		{
+			PutFire(o, logic);
+			done = true;
+		}
+	}
+}
+
 void FireLogic(MapObject& o, GameLogic* logic)
 {
  	if (!CheckVecs(o, logic))
 	{
-		// todo: bounce, sparks
-		MakeSparks(o, logic);
-		o.killme = true;
+		CalcBounce(o, logic);
 	}
 	else
 	{
@@ -602,6 +741,15 @@ void FireLogic(MapObject& o, GameLogic* logic)
 		{
 			o.data.ms.frame = 0;
 		}
+	}
+}
+
+void PutFire(MapObject& o, GameLogic* logic)
+{
+	o.data.ms.frame += (1 << 16);
+	if ((o.data.ms.frame >> 16) >= o.data.ms.shape->size())
+	{
+		o.data.ms.frame = 0;
 	}
 }
 
@@ -681,7 +829,7 @@ void Shoot(MapObject& o, GameLogic* logic, int32_t colltype, int32_t collwith, i
 	*/
 	newobject.data.ms.chunks = spark;
 	int16_t camrots[4];
-	GloomMaths::GetCamRotRaw(o.data.ms.rot & 255, camrots);
+	GloomMaths::GetCamRotRaw(o.data.ms.rotquick.GetInt() & 255, camrots);
 	/*
 	move	2(a1),d0
 	move	d0,ob_nxvec(a0)
@@ -763,7 +911,7 @@ void TerraLogic2(MapObject& o, GameLogic* logic)
 	if (o.data.ms.delay) return;
 
 	o.data.ms.delay = o.data.ms.firerate;
-	o.data.ms.rot = logic->PickCalc(o);
+	o.data.ms.rotquick.SetInt(logic->PickCalc(o));
 	CalcVecs(o);
 	Shoot(o, logic, 4, 0, 1, 3, 16, logic->wtable[3].shape, logic->wtable[3].spark);
 	SoundHandler::Play(SoundHandler::SOUND_SHOOT3);
@@ -802,7 +950,7 @@ void TerraLogic(MapObject& o, GameLogic* logic)
 	move.l	#terralogic2,ob_logic(a5)
 	rts
 	*/
-	o.data.ms.oldrot = o.data.ms.rot;
+	o.data.ms.oldrot = o.data.ms.rotquick.GetInt();
 	o.data.ms.delay--;
 
 	if (o.data.ms.delay > 0)
@@ -874,7 +1022,7 @@ void GhoulLogic(MapObject& o, GameLogic* logic)
 	*/
 
 	uint8_t ang = logic->PickCalc(o);
-	o.data.ms.rot = ang;
+	o.data.ms.rotquick.SetInt(ang);
 	o.data.ms.delay--;
 
 	if (o.data.ms.delay<=0)
@@ -952,21 +1100,60 @@ void WeaponGot(MapObject& thisobj, MapObject& otherobj, GameLogic* logic)
 {
 	SoundHandler::Play(SoundHandler::SOUND_TOKEN);
 
-	if (thisobj.data.ms.weapon > otherobj.data.ms.weapon)
+	if (thisobj.data.ms.weapon != otherobj.data.ms.weapon)
 	{
+		otherobj.data.ms.messtimer = -127;
+		otherobj.data.ms.mess = Hud::MESSAGES_NEW_WEAPON;
 		otherobj.data.ms.weapon = thisobj.data.ms.weapon;
 		otherobj.data.ms.reload = 5;
+		otherobj.data.ms.mega = 0;
 	}
 	else
 	{
-		//todo: megaweapon etc.. .
+		//megaweapon etc.. .
 		if (otherobj.data.ms.reload > 1)
 		{
+			otherobj.data.ms.messtimer = -127;
+			otherobj.data.ms.mess = (otherobj.data.ms.reload==2)?Hud::MESSAGES_WEAPON_BOOST_FULL : Hud::MESSAGES_WEAPON_BOOST;
 			otherobj.data.ms.reload--;
+		}
+		else
+		{
+			otherobj.data.ms.messtimer = -127;
+			otherobj.data.ms.mess = Hud::MESSAGES_MEGA_WEAPON_BOOST;
+			otherobj.data.ms.mega += 250;
+
+			if (otherobj.data.ms.mega >= (750 + 125))
+			{
+				otherobj.data.ms.mess = Hud::MESSAGES_ULTRA_MEGA_OVERKILL;
+			}
 		}
 	}
 	thisobj.killme = true;
 }
+
+void InvisGot(MapObject& thisobj, MapObject& otherobj, GameLogic* logic)
+{
+	SoundHandler::Play(SoundHandler::SOUND_TOKEN);
+
+	otherobj.data.ms.messtimer = -127;
+	otherobj.data.ms.mess = Hud::MESSAGES_INVISIBILITY;
+	otherobj.data.ms.invisible += 1500;
+	
+	thisobj.killme = true;
+}
+
+void ThermoGot(MapObject& thisobj, MapObject& otherobj, GameLogic* logic)
+{
+	SoundHandler::Play(SoundHandler::SOUND_TOKEN);
+
+	otherobj.data.ms.messtimer = -127;
+	otherobj.data.ms.mess = Hud::MESSAGES_THERMO;
+	otherobj.data.ms.thermo += 1500;
+
+	thisobj.killme = true;
+}
+
 
 void PauseLogic2(MapObject& o, GameLogic* logic)
 {
@@ -1304,7 +1491,7 @@ void BaldyCharge(MapObject& o, GameLogic* logic)
 
 	*/
 	int8_t ang = logic->PickCalc(o);
-	ang -= o.data.ms.rot;
+	ang -= o.data.ms.rotquick.GetInt();
 
 	if (ang > 32)
 	{
@@ -1365,7 +1552,7 @@ void BL2(MapObject& o, GameLogic* logic)
 	;
 	rts
 	*/
-	o.data.ms.rot = logic->PickCalc(o);
+	o.data.ms.rotquick.SetInt(logic->PickCalc(o));
 	o.data.ms.movspeed <<= 2;
 	o.data.ms.framespeed <<= 2;
 	CalcVecs(o);
@@ -1482,7 +1669,7 @@ void BaldyPunch(MapObject& o, GameLogic* logic)
 	if (o.data.ms.frame == 0)
 	{
 		o.data.ms.washit = 0;
-		o.data.ms.rot = logic->PickCalc(o);
+		o.data.ms.rotquick.SetInt(logic->PickCalc(o));
 		o.data.ms.frame = 5 << 16;
 	}
 	else
@@ -1666,7 +1853,7 @@ void PhantomLogic(MapObject& o, GameLogic* logic)
 	;
 	bra	shoot
 	*/
-	o.data.ms.oldrot = o.data.ms.rot;
+	o.data.ms.oldrot = o.data.ms.rotquick.GetInt();
 	o.data.ms.delay--;
 
 	if (o.data.ms.delay > 0)
@@ -1675,7 +1862,7 @@ void PhantomLogic(MapObject& o, GameLogic* logic)
 		return;
 	}
 
-	o.data.ms.rot = logic->PickCalc(o);
+	o.data.ms.rotquick.SetInt(logic->PickCalc(o));
 	CalcVecs(o);
 	o.data.ms.delay = 7;
 	o.data.ms.oldlogic = o.data.ms.logic;
@@ -1735,7 +1922,7 @@ void DemonPause(MapObject& o, GameLogic* logic)
 			wep = 4;
 		}
 		Shoot(o, logic, 4, 0, logic->wtable[wep].hitpoint, logic->wtable[wep].damage*3/4, logic->wtable[wep].speed, logic->wtable[wep].shape, logic->wtable[wep].spark);
-		SoundHandler::Play(SoundHandler::SOUND_SHOOT + wep);
+		SoundHandler::Play(logic->wtable[wep].sound);
 	}
 	/*
 	;
@@ -1776,7 +1963,7 @@ void DemonLogic(MapObject& o, GameLogic* logic)
 	rts
 	*/
 
-	o.data.ms.oldrot = o.data.ms.rot;
+	o.data.ms.oldrot = o.data.ms.rotquick.GetInt();
 	o.data.ms.delay--;
 
 	if (o.data.ms.delay > 0)
@@ -1785,9 +1972,10 @@ void DemonLogic(MapObject& o, GameLogic* logic)
 		return;
 	}
 
-	o.data.ms.rot = logic->PickCalc(o);
+	o.data.ms.rotquick.SetInt(logic->PickCalc(o));
 	CalcVecs(o);
 	// passing in a weapon number. Why not HW into demonpause? I thought it was going to be some kind of random weapon selection
+	// because, YOU IDIOT, the continual reduction of the "delay" fields allows the demon to fire multiple different kinds of bullet as it ticks down
 	o.data.ms.delay = (5<<3)-1;
 	o.data.ms.oldlogic = o.data.ms.logic;
 	o.data.ms.logic = DemonPause;
@@ -1798,9 +1986,62 @@ void HealthGot(MapObject& thisobj, MapObject& otherobj, GameLogic* logic)
 {
 	SoundHandler::Play(SoundHandler::SOUND_TOKEN);
 
-	otherobj.data.ms.hitpoints += 4;
+	otherobj.data.ms.hitpoints += 5;
 	if (otherobj.data.ms.hitpoints > 25) otherobj.data.ms.hitpoints = 25;
+
+	otherobj.data.ms.messtimer = -127;
+	otherobj.data.ms.mess = Hud::MESSAGES_HEALTH_BONUS;
+
 	thisobj.killme = true;
+}
+
+void BouncyLogic(MapObject& o, GameLogic* logic)
+{
+	static const int frames[4] = { 3, 4, 3, 5 };
+
+	/*
+	bouncylogic	
+	addq	#1, ob_delay(a5)
+	move	ob_delay(a5), d0
+	lsr	#1, d0
+	and	#3, d0
+	move.bnc(pc, d0 * 2), ob_frame(a5)
+	rts
+	.bnc	dc	3, 4, 3, 5*/
+
+	o.data.ms.delay++;
+	o.data.ms.frame = frames[(o.data.ms.delay >> 1) & 3] << 16;
+}
+
+void BouncyGot(MapObject& thisobj, MapObject& otherobj, GameLogic* logic)
+{
+	/*
+	bouncygot	bsr	playtsfx
+	cmp	#3,ob_bouncecnt(a0)
+	bcc.s	.rts
+	addq	#1,ob_bouncecnt(a0)
+	move.l	a5,-(a7)
+	move.l	a0,a5
+	bsr	message
+	dc.b	'bouncy bullets!',0
+	even
+	move.l	(a7)+,a5
+	bra	killobject
+	.rts	rts
+
+	*/
+
+	SoundHandler::Play(SoundHandler::SOUND_TOKEN);
+
+	if (otherobj.data.ms.bouncecnt < 3)
+	{
+		otherobj.data.ms.bouncecnt++;
+
+		otherobj.data.ms.messtimer = -127;
+		otherobj.data.ms.mess = Hud::MESSAGES_BOUNCY;
+
+		thisobj.killme = true;
+	}
 }
 
 void PlayerDead(MapObject& o, GameLogic* logic)
@@ -1860,7 +2101,7 @@ void PlayerDeath(MapObject& o, GameLogic* logic)
 		;
 
 	*/
-	o.data.ms.rot += 4;
+	o.data.ms.rotquick.SetInt(o.data.ms.rotquick.GetInt() + 4);
 	o.data.ms.eyey += 4;
 
 	if (o.data.ms.eyey < -32)
@@ -1974,7 +2215,7 @@ void DeathCharge(MapObject& o, GameLogic* logic)
 	DeathBounce(o, logic);
 	DeathAnim(o, logic);
 
-	int32_t ang = logic->PickCalc(o) & 255 - o.data.ms.rot & 255;
+	int32_t ang = (logic->PickCalc(o) & 255) - (o.data.ms.rotquick.GetInt() & 255);
 
 	if (ang < 0) ang = -ang;
 
@@ -1986,7 +2227,7 @@ void DeathCharge(MapObject& o, GameLogic* logic)
 		}
 		else
 		{
-			o.data.ms.rot += 128;
+			o.data.ms.rotquick.SetInt(o.data.ms.rotquick.GetInt() +  128);
 			o.data.ms.logic = DeathLogic;
 			o.data.ms.frame = 0x8000;
 			RndDelay(o);
@@ -2037,28 +2278,625 @@ void DeathLogic(MapObject& o, GameLogic* logic)
 
 	if (CheckVecs(o, logic))
 	{
-		int32_t ang = logic->PickCalc(o)&255 - o.data.ms.rot&255;
+		int32_t ang = (logic->PickCalc(o)&255) - (o.data.ms.rotquick.GetInt()&255);
 
 		if (ang < 0) ang = -ang;
 		
 		if (ang < 16)
 		{
-			o.data.ms.rot = logic->PickCalc(o) & 255;
+			o.data.ms.rotquick.SetInt(logic->PickCalc(o) & 255);
 			o.data.ms.logic = DeathCharge;
 			CalcVecs(o);
 			return;
 		}
 		else
 		{
-			o.data.ms.rot += o.data.ms.delay;
+			o.data.ms.rotquick.SetInt(o.data.ms.rotquick.GetInt() + o.data.ms.delay);
 			CalcVecs(o);
 		}
 	}
 	else
 	{
-		o.data.ms.rot += 128;
+		o.data.ms.rotquick.SetInt(o.data.ms.rotquick.GetInt() + 128);
 		RndDelay(o);
-		o.data.ms.rot += o.data.ms.delay;
+		o.data.ms.rotquick.SetInt(o.data.ms.rotquick.GetInt() + o.data.ms.delay);
 		CalcVecs(o);
 	}
+}
+
+void BlowDeath(MapObject& thisobj, MapObject& otherobj, GameLogic* logic)
+{
+	if (logic->GetSucker())
+	{
+		logic->SetSucker(0);
+		logic->SetSucking(0);
+	}
+
+	BlowObjectNoChunks(thisobj, otherobj, logic);
+}
+
+void AddSoul(int num, uint8_t ang, MapObject& o, MapObject& pobj, GameLogic* logic)
+{
+	int16_t camrots[4];
+
+	GloomMaths::GetCamRotRaw(ang, camrots);
+	/*
+
+	addsoul; d7 times!
+		;
+	addlast	blood
+		beq.rts
+		;
+	move	2(a3), d2
+		ext.l	d2
+		lsl.l	#5, d2
+		neg.l	d2
+		move	6(a3), d3
+		ext.l	d3
+		lsl.l	#5, d3
+		;
+	move.l	d2, bl_xvec(a0)
+		move.l	a5, bl_yvec(a0)
+		move.l	d3, bl_zvec(a0)
+		;
+	swap	d2
+		swap	d3
+		add	d2, d2
+		add	d3, d3
+		add	ob_x(a2), d2
+		add	ob_z(a2), d3
+		;
+	bsr	rndw
+		and	#63, d0
+		sub	#32, d0
+		add	d2, d0
+		move	d0, bl_x(a0)
+		;
+	bsr	rndw
+		and	#63, d0
+		sub	#32, d0
+		add	#110, d0
+		move	d0, bl_y(a0); >0 = funny blood!
+		;
+	bsr	rndw
+		and	#63, d0
+		sub	#32, d0
+		add	d3, d0
+		move	d0, bl_z(a0)
+		;
+	bsr	rndw
+		and	#1, d0
+		move	soulcols(pc, d0 * 2), bl_color(a0)
+		;
+	dbf	d7, addsoul
+		;
+	.rts	rts
+	*/
+
+	for (int i = 0; i < num; i++)
+	{
+		Blood bloodobj;
+		int32_t xvec = camrots[1];
+		xvec <<= 5;
+		xvec = -xvec;
+
+		int32_t zvec = camrots[3];
+		zvec <<= 5;
+
+		bloodobj.xvec.SetVal(xvec);
+		bloodobj.zvec.SetVal(zvec);
+		bloodobj.dest = o.identifier;
+
+		xvec >>= 16;
+		zvec >>= 16;
+		xvec *= 2;
+		zvec *= 2;
+
+		xvec += pobj.x.GetInt();
+		zvec += pobj.z.GetInt();
+
+		bloodobj.x.SetInt(xvec + (GloomMaths::RndW() & 63) - 32);
+		bloodobj.y.SetInt(110  + (GloomMaths::RndW() & 63) - 32);
+		bloodobj.z.SetInt(zvec + (GloomMaths::RndW() & 63) - 32);
+
+		bloodobj.color = (GloomMaths::RndW() & 1) ? 0x0ff : 0x0f0;
+
+		logic->AddBlood(bloodobj);
+	}
+}
+
+void DeathSuck(MapObject& o, GameLogic* logic)
+{
+	/*
+	deathsuck	;death head sucking out a players soul!
+	;
+	bsr	deathbounce
+	bsr	deathanim
+	subq	#1,ob_delay(a5)
+	bgt.s	.more
+	move	ob_oldrot(a5),ob_rot(a5)
+	move.l	ob_oldlogic(a5),ob_logic(a5)
+	move.l	#hurtdeath,ob_hit(a5)
+	clr.l	sucker
+	clr.l	sucking
+	bra	rnddelay
+	;
+	.more	move.l	sucking(pc),a0
+	move.l	a0,a2
+	bsr	calcangle	;point at player!
+	move	d0,ob_rot(a5)
+	;
+	add	#128,d0
+	and	#255,d0
+	move.l	camrots(pc),a3
+	lea	0(a3,d0*8),a3
+	;
+	move.l	a3,suckangle
+	;
+	;calc x/z vecs
+	;
+	moveq	#3,d7
+	bsr	addsoul
+	;
+	.rts	rts
+	*/
+
+	DeathBounce(o, logic);
+	DeathAnim(o, logic);
+
+	o.data.ms.delay--;
+
+	if (o.data.ms.delay <= 0)
+	{
+		o.data.ms.rotquick.SetInt(o.data.ms.oldrot);
+		o.data.ms.logic = o.data.ms.oldlogic;
+		o.data.ms.hit = HurtDeath;
+		logic->SetSucker(0);
+		logic->SetSucking(0);
+		RndDelay(o);
+		return;
+	}
+
+	o.data.ms.rotquick.SetInt(logic->PickCalc(o));
+
+	uint8_t ang = (o.data.ms.rotquick.GetInt() + 128);
+	logic->SetSuckAngle(ang);
+
+	MapObject pobj = logic->GetPlayerObj();
+
+	AddSoul(3, ang, o, pobj, logic);
+}
+
+void HurtDeath(MapObject& thisobj, MapObject& otherobj, GameLogic* logic)
+{
+	/*
+	hurtdeath	;OK! death head hit!
+	;
+	;point at player, and start to suck his soul!
+	;
+	move.l	sucking(pc),d0
+	bne.s	.rts
+	;
+	bsr	pickplayer
+	cmp.l	#playerlogic,ob_logic(a0)
+	bne.s	.rts
+	;
+	move.l	a0,sucking
+	move.l	a5,sucker
+	;
+	move	ob_rot(a5),ob_oldrot(a5)
+	move.l	ob_logic(a5),ob_oldlogic(a5)
+	move.l	#deathsuck,ob_logic(a5)
+	move.l	#rts,ob_hit(a5)
+	move	#64,ob_delay(a5)
+	bra.s	deathsuck
+	;
+	.rts	rts
+	*/
+
+	if (logic->GetSucking()) return;
+	MapObject pobj = logic->GetPlayerObj();
+
+	if (pobj.data.ms.logic != NullLogic) return;
+
+	logic->SetSucking(pobj.identifier);
+	logic->SetSucker(thisobj.identifier);
+
+	thisobj.data.ms.oldrot = thisobj.data.ms.rotquick.GetInt();
+	thisobj.data.ms.oldlogic = thisobj.data.ms.logic;
+
+	thisobj.data.ms.logic = DeathSuck;
+	thisobj.data.ms.hit = NullLogicComp;
+	thisobj.data.ms.delay = 64;
+	DeathSuck(thisobj, logic);
+}
+
+void DragonDead(MapObject& o, GameLogic* logic)
+{
+	o.data.ms.delay--;
+
+	if (o.data.ms.delay <= 0)
+	{
+		logic->WereDoneHere();
+	}
+}
+
+void BlowDragon(MapObject& thisobj, MapObject& otherobj, GameLogic* logic)
+{
+	/*
+	blowdragon	;same, but messier...
+	;
+	;loud!
+	;
+	move.l	diesfx(pc),a0
+	moveq	#64,d0
+	moveq	#50,d1
+	bsr	playsfx
+	move.l	diesfx(pc),a0
+	moveq	#64,d0
+	moveq	#50,d1
+	bsr	playsfx
+	move.l	robodiesfx(pc),a0
+	moveq	#64,d0
+	moveq	#50,d1
+	bsr	playsfx
+	move.l	robodiesfx(pc),a0
+	moveq	#64,d0
+	moveq	#50,d1
+	bsr	playsfx
+	;
+	moveq	#63,d7
+	bsr	bloodymess2
+	;
+	move.l	ob_chunks(a5),a4
+	bsr	blowchunx
+	bsr	blowchunx
+	bsr	blowchunx
+	bsr	blowchunx
+	;
+	move.l	#dragondead,ob_logic(a5)
+	move.l	#rts,ob_render(a5)
+	clr	ob_colltype(a5)
+	clr	ob_collwith(a5)
+	move	#127,ob_delay(a5)
+	rts
+	*/
+
+	SoundHandler::Play(SoundHandler::SOUND_DIE);
+	SoundHandler::Play(SoundHandler::SOUND_DIE);
+	SoundHandler::Play(SoundHandler::SOUND_ROBODIE);
+	SoundHandler::Play(SoundHandler::SOUND_ROBODIE);
+
+	BloodyMess2(thisobj, logic, 63);
+
+	BlowChunx(thisobj, otherobj, logic);
+	BlowChunx(thisobj, otherobj, logic);
+	BlowChunx(thisobj, otherobj, logic);
+	BlowChunx(thisobj, otherobj, logic);
+
+	thisobj.data.ms.logic = DragonDead;
+	thisobj.data.ms.render = 0;
+	thisobj.data.ms.colltype = 0;
+	thisobj.data.ms.collwith = 0;
+	thisobj.data.ms.delay = 127;
+}
+
+void DragonAnim(MapObject& o)
+{
+	o.data.ms.frame += o.data.ms.framespeed;
+	o.data.ms.frame &= 0x3FFFF;
+}
+
+void GetObRot(MapObject& o)
+{
+	/*
+	getobrot	move	ob_rotspeed(a5),d0
+	bne.s	.addr
+	;
+	;OK, randomly left/rite!
+	;
+	bsr	rndw
+	and	#1,d0
+	bne.s	.addr2
+	moveq	#-1,d0
+	;
+	.addr2	lsl	#2,d0
+	move	d0,ob_rotspeed(a5)
+	;
+	.addr	rts
+	*/
+
+	if (!o.data.ms.rotspeed)
+	{
+		o.data.ms.rotspeed = (GloomMaths::RndW() & 1) ? -0x40000 : 40000;
+	}
+}
+
+void BlowDB(MapObject& thisobj, MapObject& otherobj, GameLogic* logic)
+{
+	MakeSparksQ(thisobj, otherobj, logic);
+	thisobj.killme = true;
+}
+
+void HomeInLogic(MapObject& o, GameLogic* logic)
+{
+
+	/*
+	homeinlogic	bsr	checkvecs
+	bne.s	blowdb
+	bsr	pickcalc	;find angle to player!
+	move.l	camrots(pc),a0
+	lea	0(a0,d0*8),a0
+	*/
+	
+	if (!CheckVecs(o, logic))
+	{
+		BlowDB(o, o, logic);
+		return;
+	}
+
+	int16_t camrots[4];
+
+	GloomMaths::GetCamRotRaw(logic->PickCalc(o), camrots);
+	/*
+	move	2(a0),d4	;x acc.
+	neg	d4
+	ext.l	d4
+	lsl.l	#2,d4
+	move	6(a0),d5	;z acc.
+	ext.l	d5
+	lsl.l	#2,d5
+	;
+	*/
+	int32_t xacc, zacc;
+	xacc = -camrots[1];
+	xacc <<= 2;
+	zacc = camrots[3];
+	zacc <<= 2;
+	/*
+	add.l	ob_xvec(a5),d4
+	move.l	d4,d0
+	bpl.s	.pl1
+	neg.l	d0
+	.pl1	cmp.l	#$200000,d0	;max speed
+	bcc.s	.sk1
+	move.l	d4,ob_xvec(a5)
+	;
+	.sk1	add.l	ob_zvec(a5),d5
+	move.l	d5,d0
+	bpl.s	.pl2
+	neg.l	d0
+	.pl2	cmp.l	#$200000,d0
+	bcc.s	.sk2
+	move.l	d5,ob_zvec(a5)
+	.sk2	;
+	bra	putfire
+	*/
+	o.data.ms.xvec += xacc;
+	if (abs(o.data.ms.xvec) > 0x200000) o.data.ms.xvec -= xacc;
+
+	o.data.ms.zvec += zacc;
+	if (abs(o.data.ms.zvec) > 0x200000) o.data.ms.zvec -= zacc;
+	PutFire(o, logic);
+}
+
+void DragonFire(MapObject& o, GameLogic* logic) // starring Sylvester McCoy as Doctor Who
+{
+	/*
+	dragonfire	;dragon fires at you!
+	;
+	;d2 : colltype
+	;d3 : collwith
+	;d4 : hitpoints
+	;d5 : damage
+	;d6 : speed
+	;a2=bullet shape
+	;a3=sparks shape
+	;
+	subq	#1,ob_delay(a5)
+	bpl	.rts
+	move	ob_delay(a5),d0
+	cmp	#-16*8,d0
+	bgt.s	.try
+	move	#47,ob_delay(a5)
+	rts
+	.try	and	#7,d0
+	bne	.rts
+	;
+	*/
+	o.data.ms.delay--;
+	if (o.data.ms.delay > 0) return;
+	if (o.data.ms.delay > (-16 * 8))
+	{
+		if ((o.data.ms.delay & 7) != 0)
+		{
+			return;
+		}
+	}
+	else
+	{
+		o.data.ms.delay = 47;
+		return;
+	}
+	/*
+	.fire	moveq	#0,d2	;colltype
+	moveq	#24+3,d3	;collwith - p1/p2/bullets
+	moveq	#1,d4	;hitpoints
+	moveq	#3,d5	;damage
+	moveq	#16,d6	;speed
+	lea	bullet5,a2
+	lea	sparks5,a3
+	;
+	addlast	objects
+	beq	.rts
+	*/
+	MapObject b;
+	b.t = 999;
+	b.data.ms.blood = 0;
+	b.data.ms.colltype = 0;
+	b.data.ms.collwith = 24 + 3;
+	b.data.ms.hitpoints = 1;
+	b.data.ms.damage = 3;
+	b.data.ms.movspeed = 16;
+	b.data.ms.shape = logic->wtable[4].shape;
+	b.data.ms.chunks = logic->wtable[4].spark;
+	/*
+	;
+	move	ob_bouncecnt(a5),ob_bouncecnt(a0)
+	move	ob_x(a5),ob_x(a0)
+	move	ob_y(a5),d0
+	add	ob_firey(a5),d0
+	move	d0,ob_y(a0)
+	move	ob_z(a5),ob_z(a0)
+	move.l	#homeinlogic,ob_logic(a0)
+	move.l	#drawshape_1,ob_render(a0)
+	move.l	#makesparksq,ob_hit(a0)
+	move.l	#blowdb,ob_die(a0)
+	*/
+	b.data.ms.bouncecnt = o.data.ms.bouncecnt;
+	b.x = o.x;
+	b.y.SetInt(o.y.GetInt() + o.data.ms.firey);
+	b.z = o.z;
+	b.data.ms.logic = HomeInLogic;
+	b.data.ms.render = 1;
+	b.data.ms.hit = MakeSparksQ;
+	b.data.ms.die = BlowDB;
+	/*
+	move	d2,ob_colltype(a0)
+	move	d3,ob_collwith(a0)
+	move	d4,ob_hitpoints(a0)
+	move	d5,ob_damage(a0)
+	move	d6,ob_movspeed(a0)
+	move.l	a2,ob_shape(a0)
+	clr	ob_invisible(a0)
+	clr	ob_frame(a0)
+	move.l	a3,ob_chunks(a0)
+	*/
+	// todo INVISIBLE
+	b.data.ms.frame = 0;
+	/*
+	;
+	move	ob_rot(a5),d0
+	and	#255,d0
+	move.l	camrots(pc),a1
+	lea	0(a1,d0*8),a1
+	;
+	move	2(a1),d0
+	move	d0,ob_nxvec(a0)
+	neg	d0
+	muls	d6,d0
+	add.l	d0,d0
+	move	6(a1),d1
+	move	d1,ob_nzvec(a0)
+	muls	d6,d1
+	add.l	d1,d1
+	;
+	movem.l	d0-d1,ob_xvec(a0)
+	;
+	move	#32,ob_rad(a0)
+	move.l	#32*32,ob_radsq(a0)
+	;
+	.rts	rts
+	*/
+
+	int16_t camrots[4];
+	GloomMaths::GetCamRotRaw(o.data.ms.rotquick.GetInt() & 0xFF, camrots);
+
+	b.data.ms.nxvec = camrots[1];
+	b.data.ms.xvec = -(int32_t)camrots[1];
+	b.data.ms.xvec *= 16;
+	b.data.ms.xvec += o.data.ms.xvec;
+	
+	b.data.ms.nzvec = camrots[3];
+	b.data.ms.zvec = (int32_t)camrots[1];
+	b.data.ms.zvec *= 16;
+	b.data.ms.zvec += o.data.ms.zvec;
+
+	b.data.ms.rad = 32;
+	b.data.ms.radsq = 32;
+
+	logic->AddObject(b, false);
+}
+
+void DragonLogic(MapObject& o, GameLogic* logic)
+{
+	/*
+	dragonlogic	;OK! end of game baddy!
+	;
+	;how about cruising around in a circle a-la
+	;deathhead!
+	;
+	bsr	dragonanim
+	bsr	dragonfire
+	bsr	checkvecs
+	beq.s	.nohit
+	;
+	;OK, dragon has hit a wall...rot him around till he's clear!
+	;
+	bsr	getobrot
+	lsl	#2,d0
+	add	d0,ob_rot(a5)
+	bra	calcvecs
+	*/
+	DragonAnim(o);
+	DragonFire(o, logic);
+
+	if (!CheckVecs(o, logic))
+	{
+		GetObRot(o);
+		o.data.ms.rotquick.SetVal(o.data.ms.rotquick.GetVal() + (o.data.ms.rotspeed << 2));
+		CalcVecs(o);
+		return;
+	}
+	/*
+	.nohit	;
+	bsr	pickcalc
+	move	ob_rot(a5),d1
+	and	#255,d1
+	sub	d0,d1	;am I near?
+	bpl.s	.ansk
+	neg	d1
+	*/
+	int16_t ang = (o.data.ms.rotquick.GetInt()&255)-logic->PickCalc(o);
+
+	if (ang < 0) ang = -ang;
+	/*
+	.ansk	moveq	#6,d0
+	tst	ob_rotspeed(a5)
+	bne.s	.sh
+	moveq	#24,d0
+	*/
+	int16_t d0 = o.data.ms.rotspeed ? 6 : 24;
+
+	/*
+	.sh	cmp	d0,d1
+	bcs.s	.near
+	;
+	;not pointed at player!
+	bsr	getobrot
+	add	d0,ob_rot(a5)
+	bra	calcvecs
+	;
+	.near	tst	ob_rotspeed(a5)
+	beq.s	.near2
+	clr	ob_rotspeed(a5)	;towards player!
+	;
+	move.l	dragonsfx(pc),a0
+	moveq	#64,d0
+	moveq	#20,d1
+	bsr	playsfx
+	;
+	.near2	rts
+	*/
+	if (ang > d0)
+	{
+		GetObRot(o);
+		o.data.ms.rotquick.SetVal(o.data.ms.rotquick.GetVal() + o.data.ms.rotspeed);
+		CalcVecs(o);
+		return;
+	}
+
+	if (o.data.ms.rotspeed == 0) return;
+	o.data.ms.rotspeed = 0;
+	SoundHandler::Play(SoundHandler::SOUND_DRAGON);
 }

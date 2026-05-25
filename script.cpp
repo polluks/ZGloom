@@ -92,6 +92,12 @@ Script::ScriptOp Script::NextLine(std::string& name)
 		line++;
 		return SOP_TEXT;
 	}
+	if (lines[line].substr(0, 5) == "song_")
+	{
+		name = lines[line].substr(5, std::string::npos);
+		line++;
+		return SOP_SONG;
+	}
 
 	line++;
 	if (line == lines.size())
@@ -100,4 +106,18 @@ Script::ScriptOp Script::NextLine(std::string& name)
 		return SOP_END;
 	}
 	return SOP_NOP;
+}
+
+void Script::GetLevelNames(std::vector<std::string>& names)
+{
+	for (auto& s : lines)
+	{
+		if (s.length() > 5)
+		{
+			if (s.substr(0, 5) == "text_")
+			{
+				names.push_back(s.substr(5, std::string::npos));
+			}
+		}
+	}
 }
